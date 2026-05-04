@@ -67,10 +67,13 @@ def fetch_parse_thread():
         table_df = df
         root.after(0, lambda: display_table(df))
     except Exception as e:
-        root.after(0, lambda: Messagebox.show_error(str(e), "Error"))
+        error_msg = str(e)
+        root.after(0, lambda: Messagebox.show_error(error_msg, "Error"))
+        root.after(0, lambda: fetch_status_label.config(text="Error occurred.", bootstyle="danger"))
     finally:
         root.after(0, lambda: set_ui_state(NORMAL))
-        root.after(0, lambda: fetch_status_label.config(text=""))
+        # Clear status after 5 seconds
+        root.after(5000, lambda: fetch_status_label.config(text=""))
 
 
 def fetch_and_parse():
