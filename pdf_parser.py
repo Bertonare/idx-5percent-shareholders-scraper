@@ -58,7 +58,7 @@ def parse_shareholder_pdf(pdf_path: str, log_callback=None) -> pd.DataFrame:
                 
                 for r_idx, row in enumerate(table[:5]): # check first 5 rows of the table
                     row_str = " ".join([str(cell) for cell in row if cell]).lower()
-                    if "kode efek" in row_str or "nama emiten" in row_str:
+                    if "kode efek" in row_str or "nama emiten" in row_str or ("efek" in row_str and len(row) >= 10):
                         is_data_table = True
                         header_row_idx = r_idx
                         break
@@ -68,6 +68,9 @@ def parse_shareholder_pdf(pdf_path: str, log_callback=None) -> pd.DataFrame:
 
                 if not final_header:
                     raw_header = table[header_row_idx]
+                    # Get sub-header row (the row below the main header, for multi-level headers)
+                    sub_header = table[header_row_idx + 1] if header_row_idx + 1 < len(table) else []
+
                     # Clean header
                     i = 0
                     while i < len(raw_header):
@@ -75,24 +78,50 @@ def parse_shareholder_pdf(pdf_path: str, log_callback=None) -> pd.DataFrame:
                         if "kepemilikan per" in h.lower():
                             m = re.search(r"(\d{1,2}-[A-Z]{3}-\d{4})", h)
                             date_str = m.group(1) if m else "Date"
-                            final_header.extend([
-                                f"Jumlah Saham ({date_str})",
-                                f"Saham Gabungan ({date_str})",
-                                f"Persentase ({date_str})"
-                            ])
-                            i += 3
+
+                            # Find where this Kepemilikan group ends in the main header
+                            group_end = i + 1
+                            while group_end < len(raw_header) and (not raw_header[group_end] or not raw_header[group_end].strip()):
+                                group_end += 1
+
+                            # Count sub-columns from the sub-header row, bounded by the next main header column
+                            sub_cols = []
+                            j = i
+                            while j < group_end and j < len(sub_header) and sub_header[j] and sub_header[j].strip():
+                                sub_cols.append(sub_header[j].strip().replace("\n", " "))
+                                j += 1
+
+                            if sub_cols:
+                                for sc in sub_cols:
+                                    final_header.append(f"{sc} ({date_str})")
+                                i += len(sub_cols)
+                            else:
+                                # Fallback: assume 3 sub-columns (old format without extra columns)
+                                final_header.extend([
+                                    f"Jumlah Saham ({date_str})",
+                                    f"Saham Gabungan ({date_str})",
+                                    f"Persentase ({date_str})"
+                                ])
+                                i += 3
                         else:
                             if h:
                                 final_header.append(h)
                             else:
                                 final_header.append(f"Col_{i}")
                             i += 1
-                    
+
+                    # Fix common garbled header names from PDF text extraction
+                    header_fixes = {
+                        "keofedke": "Kode Efek",
+                        "(loksatal/taussi ng)": "Status (Lokal/Asing)",
+                    }
+                    final_header = [header_fixes.get(h.strip().lower(), h) for h in final_header]
+
                     data = table[header_row_idx + 1:]
                 else:
                     # On subsequent pages/tables, skip rows that look like headers
                     first_row_str = " ".join([str(x) for x in table[0] if x]).lower()
-                    if "kode efek" in first_row_str or "nama emiten" in first_row_str:
+                    if "kode efek" in first_row_str or "nama emiten" in first_row_str or ("efek" in first_row_str and len(table[0]) >= 10):
                         data = table[1:]
                     else:
                         data = table
@@ -138,9 +167,9 @@ def parse_shareholder_pdf(pdf_path: str, log_callback=None) -> pd.DataFrame:
             .replace(["None", "none", "", "nan"], np.nan)
         )
 
-    # Convert numeric columns
+    # Convert numeric columns (use startswith to avoid matching "Nama Pemegang Saham" etc.)
     for col in df.columns:
-        if any(keyword in col for keyword in ["Jumlah", "Saham", "Persentase", "Perubahan"]):
+        if col.startswith("Jumlah") or col.startswith("Saham") or "Persentase" in col or col == "Perubahan":
             df[col] = df[col].str.replace(",", "", regex=False)
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
@@ -168,5 +197,5 @@ def parse_shareholder_pdf(pdf_path: str, log_callback=None) -> pd.DataFrame:
         if log_callback:
             log_callback("Done. No changes found in this PDF.")
     
-    print(f"✅ Parsed and saved CSV to {csv_path}")
+    print(f"Parsed and saved CSV to {csv_path}")
     return filtered_df

@@ -104,7 +104,7 @@ def fetch_idx_pdf(exact_date=None):
                 date_str) and "_lamp" in f.lower() for f in existing_files)
             if file_already_exists:
                 print(
-                    f"✅ File already exists for date {date_str}, skipping download.")
+                    f"File already exists for date {date_str}, skipping download.")
                 save_path = os.path.join(DOWNLOAD_DIR, file_name)
                 return {
                     "title": pengumuman.get("JudulPengumuman"),
@@ -119,13 +119,13 @@ def fetch_idx_pdf(exact_date=None):
             os.makedirs(save_dir, exist_ok=True)
             save_path = os.path.join(save_dir, file_name)
 
-            print(f"⬇️ Downloading {file_name} ...")
+            print(f"Downloading {file_name} ...")
             pdf_url = attachment["FullSavePath"]
             pdf_data = scraper.get(pdf_url)
             pdf_data.raise_for_status()
             with open(save_path, "wb") as f:
                 f.write(pdf_data.content)
-            print(f"✅ Saved to {save_path}")
+            print(f"Saved to {save_path}")
 
             return {
                 "title": pengumuman.get("JudulPengumuman"),
