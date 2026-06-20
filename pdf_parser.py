@@ -8,18 +8,144 @@ RESULT_DIR = "results"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 
+def parse_shareholder_excel(excel_path: str, log_callback=None) -> pd.DataFrame:
+    """
+    Parse a shareholder ownership Excel file from IDX (Pemegang Saham di atas 5%) and
+    return a cleaned DataFrame containing relevant information.
+    """
+    excel_filename = os.path.basename(excel_path)
+    csv_filename = os.path.splitext(excel_filename)[0] + ".csv"
+    csv_path = os.path.join(RESULT_DIR, csv_filename)
+
+    if os.path.exists(csv_path):
+        if log_callback:
+            log_callback(f"CSV already exists, loading from {csv_path}")
+        print(f"CSV already exists, loading from {csv_path}")
+        return pd.read_csv(csv_path)
+
+    if log_callback:
+        log_callback(f"Parsing Excel file: {excel_filename}...")
+    print(f"Parsing Excel file: {excel_filename}...")
+
+    df_raw = pd.read_excel(excel_path, header=None)
+
+    # Find header row
+    header1_idx = -1
+    for idx, row in df_raw.iterrows():
+        row_str = " ".join([str(x) for x in row if pd.notna(x)]).lower()
+        if "kode efek" in row_str and "nama emiten" in row_str:
+            header1_idx = idx
+            break
+
+    if header1_idx == -1:
+        raise ValueError("Could not find header row in Excel")
+
+    raw_header = df_raw.iloc[header1_idx].tolist()
+    sub_header = df_raw.iloc[header1_idx + 1].tolist()
+
+    final_header = []
+    i = 0
+    while i < len(raw_header):
+        h = str(raw_header[i]).strip() if pd.notna(raw_header[i]) else ""
+        if "kepemilikan per" in h.lower():
+            m = re.search(r"(\d{1,2}-[A-Za-z]{3}-\d{4})", h)
+            date_str = m.group(1).upper() if m else "Date"
+            
+            group_end = i + 1
+            while group_end < len(raw_header) and (pd.isna(raw_header[group_end]) or str(raw_header[group_end]).strip() == ""):
+                group_end += 1
+                
+            sub_cols = []
+            j = i
+            while j < group_end and j < len(sub_header):
+                sh_val = str(sub_header[j]).strip() if pd.notna(sub_header[j]) else ""
+                if sh_val:
+                    sub_cols.append(sh_val)
+                j += 1
+                
+            if sub_cols:
+                for sc in sub_cols:
+                    final_header.append(f"{sc} ({date_str})")
+                i += len(sub_cols)
+            else:
+                final_header.extend([
+                    f"Jumlah Saham ({date_str})",
+                    f"Saham Gabungan Per Investor ({date_str})",
+                    f"Persentase Kepemilikan Per Investor (%) ({date_str})"
+                ])
+                i += 3
+        else:
+            if h:
+                final_header.append(h)
+            else:
+                final_header.append(f"Col_{i}")
+            i += 1
+
+    # Slice data rows
+    df_data = df_raw.iloc[header1_idx + 2:].copy()
+    df_data.columns = final_header
+
+    # Clean nan values to actual NaN
+    df_data = df_data.replace(["None", "none", "", "nan", "NaN"], np.nan)
+
+    # Forward fill for grouped fields: No, Kode Efek, Nama Emiten, Nama Pemegang Saham
+    for col in ["No", "Kode Efek", "Nama Emiten", "Nama Pemegang Saham"]:
+        if col in df_data.columns:
+            df_data[col] = df_data[col].ffill()
+
+    # Filter out rows where Kode Efek is not a 4-letter uppercase code
+    if "Kode Efek" in df_data.columns:
+        df_data = df_data[df_data["Kode Efek"].astype(str).str.match(r"^[A-Z0-9]{4}$", na=False)]
+
+    # Drop unnecessary columns
+    for col in ["Alamat", "Alamat (Lanjutan)", "Domisili"]:
+        if col in df_data.columns:
+            df_data = df_data.drop(columns=[col])
+
+    # Clean and convert numeric columns
+    for col in df_data.columns:
+        if col not in ["No", "Kode Efek", "Nama Emiten", "Nama Pemegang Rekening Efek", "Nama Pemegang Saham", "Nama Rekening Efek", "Kebangsaan", "Status (Lokal/Asing)"]:
+            df_data[col] = df_data[col].astype(str).str.replace(",", "", regex=False)
+            df_data[col] = pd.to_numeric(df_data[col], errors="coerce").fillna(0.0)
+
+    # Filter by Perubahan != 0
+    if "Perubahan" in df_data.columns:
+        df_changes = df_data[df_data["Perubahan"] != 0].copy()
+    else:
+        perc_cols = [c for c in df_data.columns if "Persentase" in c]
+        if len(perc_cols) >= 2:
+            df_data["Perubahan"] = df_data[perc_cols[-1]] - df_data[perc_cols[-2]]
+            df_changes = df_data[df_data["Perubahan"] != 0].copy()
+        else:
+            df_changes = df_data.copy()
+
+    # Save CSV for next time
+    if not df_changes.empty:
+        df_changes.to_csv(csv_path, index=False)
+        if log_callback:
+            log_callback(f"Done. Found {len(df_changes)} affected rows.")
+    else:
+        if log_callback:
+            log_callback("Done. No changes found in this Excel file.")
+
+    print(f"Parsed and saved CSV to {csv_path}")
+    return df_changes
+
+
 def parse_shareholder_pdf(pdf_path: str, log_callback=None) -> pd.DataFrame:
     """
-    Parse a shareholder ownership PDF from IDX (Pemegang Saham di atas 5%) and
+    Parse a shareholder ownership file (PDF or Excel) from IDX (Pemegang Saham di atas 5%) and
     return a cleaned DataFrame containing relevant information.
     Skips parsing if CSV already exists in the results folder.
 
     Args:
-        pdf_path (str): Path to the PDF file
+        pdf_path (str): Path to the PDF or Excel file
 
     Returns:
         pd.DataFrame: Filtered DataFrame of affected emitens
     """
+    if pdf_path.lower().endswith((".xlsx", ".xls")):
+        return parse_shareholder_excel(pdf_path, log_callback)
 
     # Determine corresponding CSV path
     pdf_filename = os.path.basename(pdf_path)

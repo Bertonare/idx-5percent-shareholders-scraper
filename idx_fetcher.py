@@ -2,21 +2,20 @@ import os
 from datetime import datetime, timedelta
 import cloudscraper
 
-BASE_URL = "https://www.idx.co.id/primary/ListedCompany/GetAnnouncement"
+BASE_URL = "https://www.idx.co.id/primary/list/id/perusahaan-tercatat/data-kepemilikan-saham/"
 DOWNLOAD_DIR = "downloads"
 
 
 def fetch_idx_pdf(exact_date=None):
     """
-    Fetch IDX announcements filtered by 'Pemegang Saham di atas 5%' 
-    and download the attachment containing '_lamp' in its filename.
+    Fetch IDX 5% shareholder data from the new endpoint.
     Automatically skips download if file already exists based on date in filename.
 
     Parameters
     ----------
     exact_date : str | None
-        If None -> fetch latest with _lamp.
-        If given -> fetch only _lamp file that matches the exact date (YYYYMMDD).
+        If None -> fetch latest.
+        If given -> fetch only file that matches the exact date (YYYYMMDD).
 
     Returns
     -------
@@ -29,110 +28,114 @@ def fetch_idx_pdf(exact_date=None):
     Raises
     ------
     ValueError
-        If no data found or no '_lamp' file found.
+        If no data found.
     """
-
-    today_str = datetime.today().strftime("%Y%m%d")
-
-    # === Determine search mode ===
-    if exact_date is None:
-        # Latest mode
-        params = {
-            "kodeEmiten": "",
-            "emitenType": "*",
-            "indexFrom": 0,
-            "pageSize": 10,
-            "dateFrom": "19010101",
-            "dateTo": today_str,
-            "lang": "id",
-            "keyword": "Pemegang Saham di atas 5%"
-        }
-    else:
-        dt_from = datetime.strptime(exact_date, "%Y%m%d")
-        dt_to = dt_from + timedelta(days=7)  # add 7 days
-        date_to = dt_to.strftime("%Y%m%d")
-
-        params = {
-            "kodeEmiten": "",
-            "emitenType": "*",
-            "indexFrom": 0,
-            "pageSize": 10,
-            "dateFrom": exact_date,
-            "dateTo": date_to,
-            "lang": "id",
-            "keyword": "Pemegang Saham di atas 5%"
-        }
-
-    # === Fetch data with cloudscraper ===
     scraper = cloudscraper.create_scraper()
-    response = scraper.get(BASE_URL, params=params)
-    response.raise_for_status()
+    
+    # We will search the current year and the previous year if we are looking for the latest file.
+    current_year = datetime.today().year
+    years_to_check = [current_year, current_year - 1]
+    
+    items = []
+    if exact_date:
+        year = exact_date[:4]
+        url = f"{BASE_URL}?start=0&length=9999&year={year}"
+        response = scraper.get(url)
+        response.raise_for_status()
+        items = response.json().get("items", [])
+    else:
+        for yr in years_to_check:
+            url = f"{BASE_URL}?start=0&length=9999&year={yr}"
+            try:
+                response = scraper.get(url)
+                if response.status_code == 200:
+                    yr_items = response.json().get("items", [])
+                    items.extend(yr_items)
+            except Exception:
+                pass
 
-    data = response.json().get("Replies", [])
-    if not data:
-        raise ValueError("No announcements found for the given parameters")
+    # Filter items to only include those relevant to 5% shareholders
+    filtered_items = []
+    for item in items:
+        desc = item.get("Description", "")
+        url = item.get("Prospectus", "")
+        if not url:
+            continue
+        # Check for 5% shareholder keywords in URL or description
+        is_five_percent = (
+            "lima-persen" in url.lower() or 
+            "di atas 5%" in desc.lower() or 
+            "diatas 5%" in desc.lower() or 
+            "5%" in desc.lower()
+        )
+        if is_five_percent:
+            filtered_items.append(item)
 
-    # Sort announcements by date descending (latest first)
-    data.sort(key=lambda x: x["pengumuman"].get(
-        "TglPengumuman") or "", reverse=True)
+    # Sort descending by ListingDate to ensure latest is first
+    filtered_items.sort(key=lambda x: x.get("ListingDate", ""), reverse=True)
 
-    # === Find _lamp attachment ===
-    for item in data:
-        pengumuman = item["pengumuman"]
-        attachments = item.get("attachments", [])
-        tgl_pengumuman = pengumuman.get("TglPengumuman", "")
+    target_item = None
+    if exact_date:
+        for item in filtered_items:
+            listing_date = item.get("ListingDate", "")
+            if len(listing_date) >= 10:
+                date_str = datetime.strptime(listing_date[:10], "%Y-%m-%d").strftime("%Y%m%d")
+                if date_str == exact_date:
+                    target_item = item
+                    break
+    else:
+        if filtered_items:
+            target_item = filtered_items[0]
 
-        for attachment in attachments:
-            file_name = attachment.get("OriginalFilename", "")
-            if "_lamp" not in file_name.lower():
-                continue
+    if not target_item:
+        raise ValueError(f"No 5% shareholder data found for the given parameters (exact_date: {exact_date})")
 
-            # --- exact mode must match date exactly ---
-            if exact_date:
-                date_str = datetime.strptime(
-                    tgl_pengumuman[:10], "%Y-%m-%d").strftime("%Y%m%d")
-                if date_str != exact_date:
-                    continue
-            else:
-                date_str = datetime.strptime(
-                    tgl_pengumuman[:10], "%Y-%m-%d").strftime("%Y%m%d")
+    description = target_item.get("Description", "")
+    pdf_url = target_item.get("Prospectus", "")
+    listing_date = target_item.get("ListingDate", "")
+    
+    # Extract date_str from listing_date
+    if len(listing_date) >= 10:
+        date_str = datetime.strptime(listing_date[:10], "%Y-%m-%d").strftime("%Y%m%d")
+    else:
+        date_str = datetime.today().strftime("%Y%m%d")
 
-            # --- Check if file already exists in downloads ---
-            existing_files = os.listdir(
-                DOWNLOAD_DIR) if os.path.exists(DOWNLOAD_DIR) else []
-            file_already_exists = any(f.startswith(
-                date_str) and "_lamp" in f.lower() for f in existing_files)
-            if file_already_exists:
-                print(
-                    f"File already exists for date {date_str}, skipping download.")
-                save_path = os.path.join(DOWNLOAD_DIR, file_name)
-                return {
-                    "title": pengumuman.get("JudulPengumuman"),
-                    "announcementDate": tgl_pengumuman,
-                    "attachmentUrl": attachment.get("FullSavePath"),
-                    "fileName": file_name,
-                    "savedPath": save_path
-                }
+    # Get original filename from URL
+    original_filename = pdf_url.split("/")[-1] if "/" in pdf_url else "data.xlsx"
+    file_name = f"{date_str}_{original_filename}"
+    
+    # Check if download directory exists
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    
+    # Check if file already exists in downloads (by prefix date_str)
+    existing_files = os.listdir(DOWNLOAD_DIR)
+    matching_files = [f for f in existing_files if f.startswith(date_str)]
+    
+    if matching_files:
+        saved_filename = matching_files[0]
+        save_path = os.path.join(DOWNLOAD_DIR, saved_filename)
+        print(f"File already exists for date {date_str}, skipping download.")
+        return {
+            "title": description,
+            "announcementDate": listing_date,
+            "attachmentUrl": pdf_url,
+            "fileName": saved_filename,
+            "savedPath": save_path
+        }
 
-            # --- Download logic ---
-            save_dir = DOWNLOAD_DIR
-            os.makedirs(save_dir, exist_ok=True)
-            save_path = os.path.join(save_dir, file_name)
+    save_path = os.path.join(DOWNLOAD_DIR, file_name)
+    print(f"Downloading {file_name} from {pdf_url} ...")
+    
+    pdf_data = scraper.get(pdf_url)
+    pdf_data.raise_for_status()
+    with open(save_path, "wb") as f:
+        f.write(pdf_data.content)
+    print(f"Saved to {save_path}")
 
-            print(f"Downloading {file_name} ...")
-            pdf_url = attachment["FullSavePath"]
-            pdf_data = scraper.get(pdf_url)
-            pdf_data.raise_for_status()
-            with open(save_path, "wb") as f:
-                f.write(pdf_data.content)
-            print(f"Saved to {save_path}")
-
-            return {
-                "title": pengumuman.get("JudulPengumuman"),
-                "announcementDate": tgl_pengumuman,
-                "attachmentUrl": attachment.get("FullSavePath"),
-                "fileName": file_name,
-                "savedPath": save_path
-            }
-
-    raise ValueError("No '_lamp' attachment found for the given parameters")
+    return {
+        "title": description,
+        "announcementDate": listing_date,
+        "attachmentUrl": pdf_url,
+        "fileName": file_name,
+        "savedPath": save_path
+    }
